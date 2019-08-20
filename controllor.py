@@ -7,11 +7,11 @@ import time
 import os
 #from conf import *
 
-database_host="10.144.96.115"
+database_host="host"
 database_db="summary_test"
 database_table="TestSummary_testsummary"
-database_user="root"
-database_pass="lzxg@webqa"
+database_user="user"
+database_pass="passwd"
 
 #当前机器的IP(10.134.96.64)
 local_ip = os.popen("sogou-host -a | head -1").read().replace('\n', '')
