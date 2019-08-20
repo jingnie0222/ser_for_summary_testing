@@ -2,11 +2,11 @@
 import pymysql
 import time
 
-database_host="10.144.96.115"
+database_host="root"
 database_db="summary_test"
 database_table="TestSummary_testsummary"
-database_user="root"
-database_pass="lzxg@webqa"
+database_user="user"
+database_pass="passwd"
 
 server_nodes=['10.134.96.64']
 
