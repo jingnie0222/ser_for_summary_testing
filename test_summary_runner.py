@@ -7,6 +7,7 @@ import pymysql
 import time
 import asycommands
 import pexpect
+import svnpkg
 from sum_conf import *
 
 ###### global  ######
@@ -58,7 +59,7 @@ def update_errorlog(log):
     time_str = time.strftime('%Y-%m-%d %H:%M:%S',time.localtime())
     log = log.replace("'", "\\'")
     sql = "UPDATE %s set errorlog=CONCAT(errorlog, '[%s] %s') where id=%d;" % (database_table, time_str, log, mission_id)
-    print(sql)
+    #print(sql)
     cursor.execute(sql)
     data = cursor.fetchone()
     try:
@@ -195,7 +196,7 @@ def scp_new_test_env(scp_type, ip, user, passw, datapath):
         update_errorlog("[scp_new_test_env] eof or timeout\n")
         return -1
       
-    if except_result == 1:
+    if except_result == 0:
         child.sendline(passw)
         except_result = child.expect(pat_list)
         
@@ -212,10 +213,87 @@ def scp_new_test_env(scp_type, ip, user, passw, datapath):
         
     if except_result == 3:
         return 0 
+    else:
+        return -1
+
+
+def checkcode_env(path, svn):
+    #print("path:%s" % path)   
+    if os.path.exists(path) == False:
+        update_errorlog("%s not exists, mkdir -p\n" % path)
+        os.popen("mkdir -p " + path)
+
+    update_errorlog("start check code: %s\n" % path)
+
+    mysvn = svnpkg.SvnPackage("qa_svnreader", "New$oGou4U!")
+
+    for line in svn.split("\n"):
+        line = line.strip()
+        pos = line.find('=')
+        key = line[0:pos]
+        value = line[pos+1:]
+        print("value:%s" % value)
+        if (value.find('http://') != 0):
+            update_errorlog("url format error: %s\n" % line)
+            return -1
+        key_path = os.path.join(path, key)
+
+        url = ""
+        if (mysvn.svn_info(key_path) != 0):
+        #no path, then checkout
+            ret = mysvn.svn_co(value, key_path)
+            if (ret != 0):
+                update_errorlog("[checkcode_env]check %s error:%s\n" % (key, mysvn.get_errlog()))
+                return 1
+            else:
+                mysvn.svn_info(key_path)
+                for log_line in mysvn.get_stdlog().split('\n'):
+                    if (log_line.find("URL:") == 0):
+                        url = log_line.split(' ')[1]
+                        break          
+                update_errorlog("check OK %s -> %s\n" % (key, url))
+        else:
+        #path exists, then switch
+            ret = mysvn.svn_sw(value, key_path)
+            if (ret != 0):
+                update_errorlog("[checkcode_env]svn sw %s error:%s\n" % (key, mysvn.get_errlog()))
+                return 1
+            else:
+                mysvn.svn_info(key_path)
+                for log_line in mysvn.get_stdlog().split('\n'):
+                    if (log_line.find("URL:") == 0):
+                        url = log_line.split(' ')[1]
+                        break
+                update_errorlog("check OK %s -> %s\n" % (key, url))
+                
+    update_errorlog("code checkout Success\n")
+    return 0
+
+
+def make_env(path):
+    asycmd = asycommands.TrAsyCommands(timeout=300)
+    make_log = ""
+    for iotype, line in asycmd.execute_with_data(['make', '-j'], shell=False, cwd = path):
+        if iotype == 2:
+            make_log += line + "\n"
+            
+    if (asycmd.return_code() != 0):#timeout or error, then try again
+        make_log = ""
+        for iotype, line in asycmd.execute_with_data(['make', '-j'], shell=False, cwd = path):
+            if iotype == 2:
+                make_log += line + "\n"
+    if (asycmd.return_code() != 0):
+        update_errorlog(make_log)
+        return -1
+    update_errorlog("Make Success\n")
+    return 0
+
+
+
 
 
 def main():
-
+    
     ### get task info
     (testsvn, basesvn, testitem, newconfip, newconfuser, newconfpassw, newconfpath, newdataip, newdatauser, newdatapassw, newdatapath) = get_task_info()
     print(testsvn, basesvn, testitem, newconfip, newconfuser, newconfpassw, newconfpath, newdataip, newdatauser, newdatapassw, newdatapath)
@@ -237,29 +315,65 @@ def main():
     
     ### scp test_data to local
     if (newdataip != "" and newdatauser != "" and newdatapassw != "" and newdatapath != ""):
-        update_errorlog("start try scp new_test_data to local")
+        update_errorlog("start try scp new_test_data to local\n")
         ret = scp_new_test_env('data', newdataip, newdatauser, newdatapassw, newdatapath)
         if ret != 0:
             update_errorlog("scp new_test_data Error, pls check\n")
             set_status(3)
             return -1
             
-    update_errorlog("scp new_test_data OK\n")            
+        update_errorlog("scp new_test_data OK\n")            
     
     ### scp test_conf to local
     if (newconfip != "" and newconfuser != "" and newconfpassw != "" and newconfpath != ""):
-        update_errorlog("start try scp new_test_conf to local")
+        update_errorlog("start try scp new_test_conf to local\n")
         ret = scp_new_test_env('conf', newconfip, newconfuser, newconfpassw, newconfpath)
         if ret != 0:               
             update_errorlog("scp new_test_conf Error, pls check\n")
             set_status(3)
             return -1
     
-    update_errorlog("scp new_test_conf OK\n")
+        update_errorlog("scp new_test_conf OK\n")
+    
+   
+    ### check base code and compile
+    base_code_path = root_path + base_src
+    
+    ret = checkcode_env(base_code_path, basesvn)
+    if ret != 0:
+        update_errorlog("check base code Error, pls check\n")
+        set_status(3)
+        return -1        
+    update_errorlog("check base code OK\n") 
+    
+    ret = make_env(base_code_path)
+    if ret != 0:
+       update_errorlog("compile base code Error, pls check\n") 
+       set_status(3)
+       return -1
+    update_errorlog("compile base code OK\n") 
+    
+          
+    ### check test code and compile
+    test_code_path = root_path + test_src
+    ret = checkcode_env(test_code_path, testsvn)
+    if ret != 0:
+        update_errorlog("check test code Error, pls check\n")
+        set_status(3)
+        return -1            
+    update_errorlog("check test code OK\n") 
+    
+    ret = make_env(test_code_path)
+    if ret != 0:
+       update_errorlog("compile test code Error, pls check\n") 
+       set_status(3)
+       return -1
+    update_errorlog("compile test code OK\n") 
+    
     
 
 
-
+    
     
         
 

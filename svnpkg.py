@@ -34,7 +34,7 @@ class SvnPackage:
         
     def svn_co(self, svnurl, localpath):
         try:
-            return self._do_svn('co', svnurl + " " + localpath )
+            return self._do_svn('co', svnurl + " " + localpath)
         except Exception as e:
             print("[svn_co]:%s" % e)
             return -1
@@ -150,8 +150,9 @@ class SvnPackage:
                 return -1
             run_time += 1
             time.sleep(1)
-        self.errorlog = child.stderr.read().decode('gbk')
-        self.stdlog = child.stdout.read().decode('gbk')
+
+        self.errorlog = child.stderr.read().decode('utf8')
+        self.stdlog = child.stdout.read().decode('utf8')
         print("errorlog:%s" % self.errorlog)
         print("stdlog:%s" % self.stdlog)
         return child.returncode

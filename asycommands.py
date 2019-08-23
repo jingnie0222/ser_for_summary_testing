@@ -61,10 +61,12 @@ class TrAsyCommands(object):
                 self._timer.start()
                 
 
-        except WindowsError as e:
-            return False
+        # except WindowsError as e:
+            # return False
 
-        except OSError as e:
+        # except OSError as e:
+            # return False
+        except Exception as err:
             return False
 
         return True
@@ -128,6 +130,7 @@ class TrAsyCommands(object):
 
         """
         if not self._new_proc(args=args, bufsize=bufsize, stdout=stdout, stderr=stderr, cwd=cwd, shell=shell):
+            print("111111111")
             return
 
         read_set = []
