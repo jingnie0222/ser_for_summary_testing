@@ -8,6 +8,8 @@ import time
 import asycommands
 import pexpect
 import svnpkg
+import subprocess
+import psutil
 from sum_conf import *
 
 ###### global  ######
@@ -289,11 +291,105 @@ def make_env(path):
     return 0
 
 
+def lanch(path, start_script, port, log):
+# rules: start_script must put pid in `PID` file: echo $! > PID
+# return a tuple(retcode, pid)
 
+    pid = -1
+    asycmd = asycommands.TrAsyCommands(timeout=30)
+    #asycmd_list.append(asycmd)
+    child = subprocess.Popen(['/bin/sh', start_script], shell=False, cwd = path, stderr = subprocess.PIPE)
+    child.wait()
+    
+    if (child.returncode != 0):
+        log.append(child.stderr.read())
+        print("start_time=%d, pid=%s" % (-1, pid))
+        return (-1, pid)
+        
+    for iotype, line in asycmd.execute_with_data(['/bin/cat', path + "/PID"], shell=False):
+        if (iotype == 1 and line != ""):
+            try:
+                pid = int(line)
+            except:
+                continue
+    if (pid == -1):
+        print("start_time=%d, pid=%s" % (-2, pid))
+        return (-2, pid)
+        
+    proc = None
+    try:
+        proc = psutil.Process(pid)
+    except:
+        log.append("process %d is not alive" % pid)
+        print("start_time=%d, pid=%s" % (-3, pid))
+        return (-3, pid)
+    
+    #启动压力工具时，port参数为-1，因为压力工具没有监听端口
+    if port == -1:
+        return (0, pid)
+    
+    #通过判断进程的端口号是否在监听，来判断进程是否存活
+    is_alive = True
+    start_time = 0
+    #proc_list.append(pid)
+    while is_alive:
+        try:
+            conn_list = proc.connections()
+        except:
+            is_alive = False
+            break
+            
+        listened = False
+        for conn in conn_list:
+            #lquery的端口号状态为None，其余一般都是LISTEN
+            if conn.status == "LISTEN" or conn.status == "NONE" and conn.laddr[1] == port:
+                listened = True
+                break
+        if listened:
+            break
+        time.sleep(1)
+        start_time += 1
+        
+    if not is_alive:
+        log.append("process start failed")
+        #proc_list.remove(pid)
+        print("start_time=%d, pid=%s" % (-3, pid))
+        return (-3, pid)
+        
+    return (start_time, pid)
+
+
+def prepare_symbolic_link(desc_path):
+    #在Websummary目录下对data、conf、start.sh进行软链
+    try:
+           
+        if os.path.exists(desc_path + 'data') == True:
+            os.popen("rm -rf %s" % desc_path + 'data')               
+        if os.path.exists(desc_path + 'conf') == True:
+            os.popen("rm -rf %s" % desc_path + 'conf')       
+        if os.path.exists(desc_path + 'start.sh') == True:
+            os.popen("rm -rf %s" % desc_path + 'start.sh')
+        
+        if 'base_src' in desc_path:
+            os.popen("ln -s %s %s" % (root_path + base_data, desc_path + 'data'))
+            os.popen("ln -s %s %s" % (root_path + base_conf, desc_path + 'conf'))
+            os.popen("ln -s %s %s" % (root_path + base_script, desc_path + 'start.sh'))
+            return 0
+                   
+        if 'test_src' in desc_path:
+            os.popen("ln -s %s %s" % (root_path + test_data, desc_path + 'data'))
+            os.popen("ln -s %s %s" % (root_path + test_conf, desc_path + 'conf'))
+            os.popen("ln -s %s %s" % (root_path + test_script, desc_path + 'start.sh'))
+            return 0
+            
+    except Exception as err:
+        update_errorlog("[prepare_symbolic_link]:%s" % err)
+        return -1
+        
 
 
 def main():
-    
+ 
     ### get task info
     (testsvn, basesvn, testitem, newconfip, newconfuser, newconfpassw, newconfpath, newdataip, newdatauser, newdatapassw, newdatapath) = get_task_info()
     print(testsvn, basesvn, testitem, newconfip, newconfuser, newconfpassw, newconfpath, newdataip, newdatauser, newdatapassw, newdatapath)
@@ -371,10 +467,28 @@ def main():
     update_errorlog("compile test code OK\n") 
     
     
-
-
+    ### create symbolic link for base env 
+    base_env = root_path + base_src + 'WebSummary/'
+    print("base env:%s" % base_env)
+    ret = prepare_symbolic_link(base_env) 
+    if ret != 0:
+        update_errorlog("prepare symbolic link for %s Error\n" % base_env)
+        set_status(3)
+        return -1
+    update_errorlog("prepare symbolic link for %s Success\n" % base_env)
+    
+    ### create symbolic link for test env 
+    test_env = root_path + test_src + 'WebSummary/'
+    ret = prepare_symbolic_link(test_env) 
+    if ret != 0:
+        update_errorlog("prepare symbolic link for %s Error\n" % test_env)
+        set_status(3)
+        return -1
+    update_errorlog("prepare symbolic link for %s Success\n" % test_env)
     
     
+    
+   
         
 
 if __name__ == "__main__":
