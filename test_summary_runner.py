@@ -10,6 +10,7 @@ import pexpect
 import svnpkg
 import subprocess
 import psutil
+import myconfigparser
 from sum_conf import *
 
 ###### global  ######
@@ -69,6 +70,45 @@ def update_errorlog(log):
     except Exception as err:
         print('[update_errorlog:%s]' % err)
     return data
+
+def get_proc_status(pid):
+    try:
+        p = psutil.Process(pid)
+    except:
+        return -1
+    if (p.status() == "running"):
+        return 0
+    elif (p.status() == "sleeping"):
+        return 1
+    return 2
+    
+
+def wait_to_die(pid, interval):
+    while get_proc_status(pid) != -1:
+        time.sleep(interval)
+        if (interval > 10):
+            interval = interval/2
+
+
+def modify_config(file, sec, key, value):
+#修改file配置文件中，sec下的配置项为key的value
+    if not os.path.exists(file):
+        update_errorlog("[modify_config] file:%s is not exist\n" % file)
+        return -1
+    try:
+        cf = myconfigparser.MyConfigParser()
+        cf.read(file)
+        if sec and key and value:
+            key = '"' + key + '"'
+            value = '"' + value + '"'
+            cf.set(sec, key, value)
+            with open(file, 'w') as f:
+                cf.write(f, space_around_delimiters=False)
+        return 0
+    except Exception as err:
+        update_errorlog("[modify_config]:%s" % err)
+        return -1
+            
 
 def sync_ol_to_local(rsync_type):
 
@@ -351,12 +391,36 @@ def lanch(path, start_script, port, log):
         start_time += 1
         
     if not is_alive:
-        log.append("process start failed")
+        log.append("process start failed:%s" % path)
         #proc_list.remove(pid)
         print("start_time=%d, pid=%s" % (-3, pid))
         return (-3, pid)
         
     return (start_time, pid)
+
+
+def check_lanch(path, start_script, port, err_name):
+    log = []
+    if (path == ""):
+        return 0
+    log_file = path + err_name
+    asycmd = asycommands.TrAsyCommands(timeout=120)
+    #asycmd_list.append(asycmd)
+
+    (ret, pid) = lanch(path, start_script, port, log)
+    if (ret < 0):
+        time.sleep(0.5)
+        up_log = ""
+        for line in log:
+            up_log += "%s\n" % line
+        update_errorlog("%s\n" % up_log)
+        
+        up_log = ""
+        for iotype, line in asycmd.execute_with_data(['/bin/tail', '-50', log_file], shell=False):
+            up_log += line + '\n'
+        update_errorlog("%s\n" % up_log)
+        return -1
+    return ret 
 
 
 def prepare_symbolic_link(desc_path):
@@ -370,12 +434,14 @@ def prepare_symbolic_link(desc_path):
         if os.path.exists(desc_path + 'start.sh') == True:
             os.popen("rm -rf %s" % desc_path + 'start.sh')
         
+        #对base环境创建软链
         if 'base_src' in desc_path:
             os.popen("ln -s %s %s" % (root_path + base_data, desc_path + 'data'))
             os.popen("ln -s %s %s" % (root_path + base_conf, desc_path + 'conf'))
             os.popen("ln -s %s %s" % (root_path + base_script, desc_path + 'start.sh'))
             return 0
-                   
+        
+        #对test环境创建软链        
         if 'test_src' in desc_path:
             os.popen("ln -s %s %s" % (root_path + test_data, desc_path + 'data'))
             os.popen("ln -s %s %s" % (root_path + test_conf, desc_path + 'conf'))
@@ -385,11 +451,199 @@ def prepare_symbolic_link(desc_path):
     except Exception as err:
         update_errorlog("[prepare_symbolic_link]:%s" % err)
         return -1
+
+
+def get_perf_res(log_file, result):
+    if os.path.exists(log_file) == False:
+        result.append(log_file + " is not exists")
+        return -1
+    asycmd = asycommands.TrAsyCommands(timeout=180)
+    #asycmd_list.append(asycmd)
+    for iotype, line in asycmd.execute_with_data(['/bin/awk', '-f' , perf_tool, log_file], shell=False):
+        result.append(line)
+    return asycmd.return_code()        
+
+def performance(basepath, testpath, loadpath, presspath, err_name = "err"):
+ 
+    
+    #修改配置文件的监听端口、备库配置、缓存大小等配置
+    base_cf = root_path + base_conf + "norm_onsum01.cfg"
+    test_cf = root_path + test_conf + "norm_onsum01.cfg"
+    
+    try:
+        ret = modify_config(base_cf, 'Summary\DBstandby', 'db01', '10.11.12.13:4567')
+        modify_config(base_cf, 'Summary\SummaryNetwork', 'ListenAddress', ':18018')
+        modify_config(base_cf, 'Summary\Summary', 'LruSummaryReqCacheSize', 'dword:0000000a')
+        modify_config(base_cf, 'Summary\Summary', 'LfuSummaryReqCacheSize', 'dword:0000000a')
+    except Exception as err:
+        update_errorlog("modify config:%s error\n" % base_cf)
+        set_status(3)
+        return -1
         
+    try:    
+        modify_config(test_cf, 'Summary\DBstandby', 'db01', '10.11.12.13:4567')
+        modify_config(test_cf, 'Summary\SummaryNetwork', 'ListenAddress', ':19018')
+        modify_config(test_cf, 'Summary\Summary', 'LruSummaryReqCacheSize', 'dword:0000000a')
+        modify_config(test_cf, 'Summary\Summary', 'LfuSummaryReqCacheSize', 'dword:0000000a')
+    except Exception as err:
+        update_errorlog("modify config:%s error\n" % test_cf)
+        set_status(3)
+        return -1
+    
+    #启动base summary   
+    log = []
+    if (basepath == ""):
+        return 0
+    log_file = basepath + err_name
+    asycmd = asycommands.TrAsyCommands(timeout=120)
+    #asycmd_list.append(asycmd)
+
+    (ret, pid) = lanch(basepath, "start.sh", 18018, log)
+    if (ret < 0):
+        time.sleep(0.5)
+        up_log = ""
+        for line in log:
+            up_log += "%s\n" % line
+        update_errorlog("%s\n" % up_log)
+        
+        up_log = ""
+        for iotype, line in asycmd.execute_with_data(['/bin/tail', '-50', log_file], shell=False):
+            up_log += line + '\n'
+        update_errorlog("%s\n" % up_log)
+        return -1
+    update_errorlog("Base Summary start ok, use %d s\n" % ret)
+
+    #启动test summary     
+    log = []
+    if (testpath == ""):
+        return 0
+    log_file = basepath + err_name
+    asycmd = asycommands.TrAsyCommands(timeout=120)
+    #asycmd_list.append(asycmd)
+
+    (ret, pid) = lanch(testpath, "start.sh", 19018, log)
+    if (ret < 0):
+        time.sleep(0.5)
+        up_log = ""
+        for line in log:
+            up_log += "%s\n" % line
+        update_errorlog("%s\n" % up_log)
+        
+        up_log = ""
+        for iotype, line in asycmd.execute_with_data(['/bin/tail', '-50', log_file], shell=False):
+            up_log += line + '\n'
+        update_errorlog("%s\n" % up_log)
+        return -1
+    update_errorlog("Test Summary start ok, use %d s\n" % ret)  
+
+    #启动负载工具        
+    log = []
+    if (loadpath == ""):
+        return 0
+    log_file = loadpath + err_name
+    asycmd = asycommands.TrAsyCommands(timeout=120)
+    #asycmd_list.append(asycmd)
+
+    (ret, pid) = lanch(loadpath, "start.sh", -1, log)
+    if (ret < 0):
+        time.sleep(0.5)
+        up_log = ""
+        for line in log:
+            up_log += "%s\n" % line
+        update_errorlog("%s\n" % up_log)
+        
+        up_log = ""
+        for iotype, line in asycmd.execute_with_data(['/bin/tail', '-50', log_file], shell=False):
+            up_log += line + '\n'
+        update_errorlog("%s\n" % up_log)
+        return -1
+    update_errorlog("Load Tools start ok, use %d s\n" % ret) 
+
+    time.sleep(10)
+    
+    #启动summary压力工具
+    log = []
+    if (presspath == ""):
+        return 0
+        
+    log_file1 = presspath + err_name + "1"
+    log_file2 = presspath + err_name + "2"
+    asycmd = asycommands.TrAsyCommands(timeout=120)
+    #asycmd_list.append(asycmd)
+
+    (ret, tool1_pid) = lanch(presspath, "start1.sh", -1, log)
+    if (ret < 0):
+        time.sleep(0.5)
+        up_log = ""
+        for line in log:
+            up_log += "%s\n" % line
+        update_errorlog("%s\n" % up_log)
+        
+        up_log = ""
+        for iotype, line in asycmd.execute_with_data(['/bin/tail', '-50', log_file1], shell=False):
+            up_log += line + '\n'
+        update_errorlog("%s\n" % up_log)
+        return -1
+    update_errorlog("Press Tools 1 start ok, use %d s\n" % ret) 
+    
+    log = []
+    (ret, tool2_pid) = lanch(presspath, "start2.sh", -1, log)
+    if (ret < 0):
+        time.sleep(0.5)
+        up_log = ""
+        for line in log:
+            up_log += "%s\n" % line
+        update_errorlog("%s\n" % up_log)
+        
+        up_log = ""
+        for iotype, line in asycmd.execute_with_data(['/bin/tail', '-50', log_file2], shell=False):
+            up_log += line + '\n'
+        update_errorlog("%s\n" % up_log)
+        return -1
+    update_errorlog("Press Tools 2 start ok, use %d s\n" % ret) 
+    
+    #等待压力结束   
+    wait_to_die(tool1_pid, 5*60)
+    update_errorlog("Press Tool1 stoped\n")
+    
+    wait_to_die(tool2_pid, 5*60)
+    update_errorlog("Press Tool2 stoped\n")
+    
+    #统计性能结果
+    perf_res = []
+    ret = get_perf_res(basepath + err_name, perf_res)
+    if ret != 0:
+        update_errorlog("base performance statistics error")
+        return -1
+    base_perf_str = ""
+    for line in perf_res:
+        base_perf_str += line + "\n"
+    sql = "UPDATE %s set performance_base='%s' where id=%d;" % (database_table, base_perf_str, mission_id)
+    cursor.execute(sql)
+    db.commit()
+    
+    perf_res = []
+    ret = get_perf_res(testpath + err_name, perf_res)
+    if ret != 0:
+        update_errorlog("test performance statistics error")
+        return -1
+    test_perf_str = ""
+    for line in perf_res:
+        test_perf_str += line + "\n"
+    sql = "UPDATE %s set performance_test='%s' where id=%d;" % (database_table, test_perf_str, mission_id)
+    cursor.execute(sql)
+    db.commit()
+    
+    
+    
+
+
+
+       
 
 
 def main():
- 
+    '''
     ### get task info
     (testsvn, basesvn, testitem, newconfip, newconfuser, newconfpassw, newconfpath, newdataip, newdatauser, newdatapassw, newdatapath) = get_task_info()
     print(testsvn, basesvn, testitem, newconfip, newconfuser, newconfpassw, newconfpath, newdataip, newdatauser, newdatapassw, newdatapath)
@@ -465,7 +719,7 @@ def main():
        set_status(3)
        return -1
     update_errorlog("compile test code OK\n") 
-    
+    '''
     
     ### create symbolic link for base env 
     base_env = root_path + base_src + 'WebSummary/'
@@ -487,6 +741,10 @@ def main():
     update_errorlog("prepare symbolic link for %s Success\n" % test_env)
     
     
+    ### start base summary 
+    load_path = root_path + load_tool
+    press_path = root_path + press_tool
+    performance(base_env, test_env, load_path, press_path)  
     
    
         
