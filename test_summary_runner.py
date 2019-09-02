@@ -11,6 +11,7 @@ import svnpkg
 import subprocess
 import psutil
 import myconfigparser
+import math
 from sum_conf import *
 
 ###### global  ######
@@ -89,26 +90,59 @@ def wait_to_die(pid, interval):
         if (interval > 10):
             interval = interval/2
 
+def wait_to_load(pid, interval):
+    #检查机器的负载是否达到20，内存占用是否达到50G
+    #占用内存前需要先清除系统缓存
+    os.popen('echo 3 > /proc/sys/vm/drop_caches')  
+    load_capture = False
+    mem_capture = False
+    p = psutil.Process(pid)
+        
+    while True:
+        (load_1, load_5, load_15) = psutil.getloadavg()
+        if math.floor(int(load_1)) > 20:
+            load_capture = True
+           
+        mem_byte = p.memory_info()[0] 
+        mem_g = int(mem_byte/(1024*1024*1024))
+        if mem_g >= 50:
+            mem_capture = True
+        
+        if load_capture and mem_capture:
+            update_errorlog("LoadAvg > 20 and mem >= 50\n")
+            break
+            
+        print("LoadAvg < 20 or mem <= 50")       
+        time.sleep(interval)
+        if (interval > 10):
+            interval = interval/2
+    
 
 def modify_config(file, sec, key, value):
 #修改file配置文件中，sec下的配置项为key的value
     if not os.path.exists(file):
         update_errorlog("[modify_config] file:%s is not exist\n" % file)
         return -1
+    cf = myconfigparser.MyConfigParser()
+    cf.read(file)
+    if sec and key and value:
+        key = '"' + key + '"'
+        value = '"' + value + '"'
+        cf.set(sec, key, value)
+        with open(file, 'w') as f:
+            cf.write(f, space_around_delimiters=False)
+    return 0
+
+
+def modify_sum_conf(file, db, port, cachesize):
     try:
-        cf = myconfigparser.MyConfigParser()
-        cf.read(file)
-        if sec and key and value:
-            key = '"' + key + '"'
-            value = '"' + value + '"'
-            cf.set(sec, key, value)
-            with open(file, 'w') as f:
-                cf.write(f, space_around_delimiters=False)
-        return 0
+        modify_config(file, 'Summary\DBstandby', 'db01', db)
+        modify_config(file, 'Summary\SummaryNetwork', 'ListenAddress', port)
+        modify_config(file, 'Summary\Summary', 'LruSummaryReqCacheSize', cachesize)
+        modify_config(file, 'Summary\Summary', 'LfuSummaryReqCacheSize', cachesize)
     except Exception as err:
-        update_errorlog("[modify_config]:%s" % err)
         return -1
-            
+
 
 def sync_ol_to_local(rsync_type):
 
@@ -172,10 +206,8 @@ def sync_ol_to_local(rsync_type):
         for iotype, line in asycmd.execute_with_data(['rsync', '-ravlu', 'rsync.query001.web.djt.ted::odin/search/odin/daemon/data_agent/data/base/', '/search/odin/daemon/data_agent/data/base/'], shell=False):
             if iotype == 1:
                 stdlog += line + '\n'
-                #print("[sync_ol_to_local] stdlog:%s", line)
             elif iotype == 2:
                 errlog += line + '\n'
-                #print("[sync_ol_to_local] errlog:%s", line)
     
         if (asycmd.return_code() != 0):
             update_errorlog("rsync symbolic link file to local Error\n")
@@ -313,7 +345,7 @@ def checkcode_env(path, svn):
 
 
 def make_env(path):
-    asycmd = asycommands.TrAsyCommands(timeout=300)
+    asycmd = asycommands.TrAsyCommands(timeout=600)
     make_log = ""
     for iotype, line in asycmd.execute_with_data(['make', '-j'], shell=False, cwd = path):
         if iotype == 2:
@@ -463,32 +495,25 @@ def get_perf_res(log_file, result):
     return asycmd.return_code()        
 
 
-def performance(base_path, test_path, load_path, press_path, err_name = "err"):  
+def performance(base_path, test_path, load_path, press_path, err_name = "err"): 
+
+    os.popen('killall -9 lt-websummaryd lt-summarytest CAPTURE_RESOURCE')
+    time.sleep(3) 
 
     #修改配置文件的监听端口、备库配置、缓存大小等配置
     base_cf = root_path + base_conf + "norm_onsum01.cfg"
     test_cf = root_path + test_conf + "norm_onsum01.cfg"
     
-    try:
-        modify_config(base_cf, 'Summary\DBstandby', 'db01', '10.11.12.13:4567')
-        modify_config(base_cf, 'Summary\SummaryNetwork', 'ListenAddress', ':18018')
-        modify_config(base_cf, 'Summary\Summary', 'LruSummaryReqCacheSize', 'dword:0000000a')
-        modify_config(base_cf, 'Summary\Summary', 'LfuSummaryReqCacheSize', 'dword:0000000a')
-    except Exception as err:
+    ret = modify_sum_conf(base_cf, db_standby, base_sum_port, sum_cache_size)
+    if ret == -1:
         update_errorlog("modify config:%s error\n" % base_cf)
-        set_status(3)
         return -1
         
-    try:    
-        modify_config(test_cf, 'Summary\DBstandby', 'db01', '10.11.12.13:4567')
-        modify_config(test_cf, 'Summary\SummaryNetwork', 'ListenAddress', ':19018')
-        modify_config(test_cf, 'Summary\Summary', 'LruSummaryReqCacheSize', 'dword:0000000a')
-        modify_config(test_cf, 'Summary\Summary', 'LfuSummaryReqCacheSize', 'dword:0000000a')
-    except Exception as err:
+    ret = modify_sum_conf(test_cf, db_standby, test_sum_port, sum_cache_size)
+    if ret == -1:
         update_errorlog("modify config:%s error\n" % test_cf)
-        set_status(3)
         return -1
-
+    
     #启动base summary
     ret, pid = check_lanch(base_path, "start.sh", 18018, err_name)
     if ret < 0:
@@ -504,11 +529,15 @@ def performance(base_path, test_path, load_path, press_path, err_name = "err"):
     update_errorlog("Test Summary start ok, use %d s\n" % ret)
     
     #启动负载工具
-    ret, pid  = check_lanch(load_path, "start.sh", -1, err_name)
+    ret, laod_pid  = check_lanch(load_path, "start.sh", -1, err_name)
     if ret < 0:
         update_errorlog("Load Tool start failed")
         return -1        
     update_errorlog("Load Tool start ok, use %d s\n" % ret)
+    
+    #等负载生效
+    wait_to_load(laod_pid, 20)
+    
     
     #启动压力工具1
     press_err_name1 = err_name + "1"  #err1
@@ -526,20 +555,20 @@ def performance(base_path, test_path, load_path, press_path, err_name = "err"):
         return -1        
     update_errorlog("Press Tool 2 start ok, use %d s\n" % ret)
     
-    update_errorlog("performance start, about 20min")
+    update_errorlog("performance start, about 20min\n")
     
     #等待压力结束   
-    wait_to_die(tool1_pid, 10)
+    wait_to_die(tool1_pid, 5*60)
     update_errorlog("Press Tool1 stoped\n")
     
-    wait_to_die(tool2_pid, 10)
+    wait_to_die(tool2_pid, 5*60)
     update_errorlog("Press Tool2 stoped\n")
     
     #统计性能结果
     perf_res = []
     ret = get_perf_res(base_path + err_name, perf_res)
     if ret != 0:
-        update_errorlog("base performance statistics error")
+        update_errorlog("base performance statistics error\n")
         return -1
     base_perf_str = ""
     for line in perf_res:
@@ -547,12 +576,12 @@ def performance(base_path, test_path, load_path, press_path, err_name = "err"):
     sql = "UPDATE %s set performance_base='%s' where id=%d;" % (database_table, base_perf_str, mission_id)
     cursor.execute(sql)
     db.commit()
-    update_errorlog("base summary statistics ok")
+    update_errorlog("base summary statistics ok\n")
     
     perf_res = []
     ret = get_perf_res(test_path + err_name, perf_res)
     if ret != 0:
-        update_errorlog("test performance statistics error")
+        update_errorlog("test performance statistics error\n")
         return -1
     test_perf_str = ""
     for line in perf_res:
@@ -560,11 +589,12 @@ def performance(base_path, test_path, load_path, press_path, err_name = "err"):
     sql = "UPDATE %s set performance_test='%s' where id=%d;" % (database_table, test_perf_str, mission_id)
     cursor.execute(sql)
     db.commit()
-    update_errorlog("test summary statistics ok")
+    update_errorlog("test summary statistics ok\n")
+    
 
 
 def main():
-    '''
+    
     ### get task info
     (testsvn, basesvn, testitem, newconfip, newconfuser, newconfpassw, newconfpath, newdataip, newdatauser, newdatapassw, newdatapath) = get_task_info()
     print(testsvn, basesvn, testitem, newconfip, newconfuser, newconfpassw, newconfpath, newdataip, newdatauser, newdatapassw, newdatapath)
@@ -606,7 +636,7 @@ def main():
     
         update_errorlog("scp new_test_conf OK\n")
     
-   
+    
     ### check base code and compile
     base_code_path = root_path + base_src
     
@@ -640,7 +670,7 @@ def main():
        set_status(3)
        return -1
     update_errorlog("compile test code OK\n") 
-    '''
+    
     
     ### create symbolic link for base env 
     base_env = root_path + base_src + 'WebSummary/'
@@ -660,12 +690,18 @@ def main():
         set_status(3)
         return -1
     update_errorlog("prepare symbolic link for %s Success\n" % test_env)
-     
-    ### start performance
-    load_path = root_path + load_tool
-    press_path = root_path + press_tool
+    
+    
+    ### start performance, kill CAPTURE_RESOURCE 
     ret = performance(base_env, test_env, load_path, press_path)
-        
+    if ret == -1:
+        update_errorlog("performance test Failed\n")
+        set_status(3)
+        os.popen('killall -9 CAPTURE_RESOURCE')
+        return -1
+    os.popen('killall -9 CAPTURE_RESOURCE') 
+    time.sleep(3)
+    update_errorlog("performance test OK\n")    
     
    
         
