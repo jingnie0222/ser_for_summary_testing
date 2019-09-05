@@ -13,6 +13,8 @@ import psutil
 import myconfigparser
 import math
 from sum_conf import *
+import parsediff
+
 
 ###### global  ######
 db = pymysql.connect(database_host, database_user, database_pass ,database_db, charset="utf8")
@@ -50,15 +52,27 @@ def set_status(stat):
         print("[set_status:%s] % err")
         
     if (stat != 1):
-        #clean_proc()
-        pass
-        
+        clean_proc()
+
 def clean_proc():
     os.popen('killall -9 memcached lt-memdb_daemon sggp lt-webcached')
     time.sleep(3)
-
     return
     
+'''       
+def clean_proc():
+    for pid in proc_list:
+        try:
+            stop_proc(pid)
+        except:
+            pass
+    for asy in asycmd_list:
+        try:
+            asy.stop()
+        except:
+            pass
+'''   
+
 def update_errorlog(log):
     time_str = time.strftime('%Y-%m-%d %H:%M:%S',time.localtime())
     log = log.replace("'", "\\'")
@@ -83,15 +97,14 @@ def get_proc_status(pid):
         return 1
     return 2
     
-
 def wait_to_die(pid, interval):
     while get_proc_status(pid) != -1:
         time.sleep(interval)
         if (interval > 10):
             interval = interval/2
 
-def wait_to_load(pid, interval):
-    #检查机器的负载是否达到20，内存占用是否达到50G
+def wait_to_load(pid, mem, load, interval):
+    #检查机器的负载是否达到load，内存占用是否达到memG
     #占用内存前需要先清除系统缓存
     os.popen('echo 3 > /proc/sys/vm/drop_caches')  
     load_capture = False
@@ -100,19 +113,22 @@ def wait_to_load(pid, interval):
         
     while True:
         (load_1, load_5, load_15) = psutil.getloadavg()
-        if math.floor(int(load_1)) > 20:
+        print("load:%d" % int(load_1))
+        if int(load_1) > load:
             load_capture = True
            
         mem_byte = p.memory_info()[0] 
+        print("mem_byte:%d" % mem_byte)
         mem_g = int(mem_byte/(1024*1024*1024))
-        if mem_g >= 50:
+        print("mem:%d" % mem_g)
+        if mem_g >= mem:
             mem_capture = True
         
         if load_capture and mem_capture:
-            update_errorlog("LoadAvg > 20 and mem >= 50\n")
+            update_errorlog("LoadAvg > %d and mem >= %d\n" % (load, mem))
             break
             
-        print("LoadAvg < 20 or mem <= 50")       
+        print("LoadAvg < %d or mem <= %d" % (load, mem))       
         time.sleep(interval)
         if (interval > 10):
             interval = interval/2
@@ -535,8 +551,8 @@ def performance(base_path, test_path, load_path, press_path, err_name = "err"):
         return -1        
     update_errorlog("Load Tool start ok, use %d s\n" % ret)
     
-    #等负载生效
-    wait_to_load(laod_pid, 20)
+    #等负载生效，负载为20，占用内存50G:pid, mem, load, interval
+    wait_to_load(laod_pid, 50, 20, 20)
     
     
     #启动压力工具1
@@ -592,6 +608,90 @@ def performance(base_path, test_path, load_path, press_path, err_name = "err"):
     update_errorlog("test summary statistics ok\n")
     
 
+def sum_diff(base_path, test_path, press_path, err_name = "err"): 
+    os.popen('killall -9 lt-websummaryd lt-summarytest CAPTURE_RESOURCE')
+    time.sleep(3) 
+    base_diff_lst = []
+    test_diff_lst = []
+    '''
+    #修改配置文件的监听端口、备库配置、缓存大小等配置
+    base_cf = root_path + base_conf + "norm_onsum01.cfg"
+    test_cf = root_path + test_conf + "norm_onsum01.cfg"
+    
+    ret = modify_sum_conf(base_cf, db_standby, base_sum_port, sum_cache_size)
+    if ret == -1:
+        update_errorlog("modify config:%s error\n" % base_cf)
+        return -1
+        
+    ret = modify_sum_conf(test_cf, db_standby, test_sum_port, sum_cache_size)
+    if ret == -1:
+        update_errorlog("modify config:%s error\n" % test_cf)
+        return -1
+    
+    #启动base summary
+    ret, pid = check_lanch(base_path, "start.sh", 18018, err_name)
+    if ret < 0:
+        update_errorlog("Base Summary start failed")
+        return -1        
+    update_errorlog("Base Summary start ok, use %d s\n" % ret)
+    
+    #启动test summary
+    ret, pid  = check_lanch(test_path, "start.sh", 19018, err_name)
+    if ret < 0:
+        update_errorlog("Test Summary start failed")
+        return -1        
+    update_errorlog("Test Summary start ok, use %d s\n" % ret)
+        
+    #启动压力工具1
+    press_err_name1 = err_name + "_diff1"  #err1
+    ret, tool1_pid  = check_lanch(press_path, "start_diff1.sh", -1, press_err_name1)
+    if ret < 0:
+        update_errorlog("Press Tool 1 start failed")
+        return -1        
+    update_errorlog("Press Tool 1 start ok, use %d s\n" % ret)
+    
+    #启动压力工具2
+    press_err_name2 = err_name + "_diff2"  #err2
+    ret, tool2_pid = check_lanch(press_path, "start_diff2.sh", -1, press_err_name2)
+    if ret < 0:
+        update_errorlog("Press Tool 2 start failed")
+        return -1        
+    update_errorlog("Press Tool 2 start ok, use %d s\n" % ret)
+    
+    update_errorlog("diff test start\n")
+    
+    #等待压力结束   
+    wait_to_die(tool1_pid, 2*60)
+    update_errorlog("Press Tool1 stoped\n")
+    
+    wait_to_die(tool2_pid, 2*60)
+    update_errorlog("Press Tool2 stoped\n")
+    '''
+    ret = parsediff.gen_diff(base_path + err_name, test_path + err_name, base_diff_lst, test_diff_lst)
+    if ret != 0:
+        update_errorlog("parse diff error\n")
+        return -1
+        
+    #diff结果入库
+    try:
+        for node1, node2 in zip(base_diff_lst, test_diff_lst):
+            base_diff = ""
+            test_diff = ""
+            for key, value in node1.items():
+                base_diff += "%s : %s" % (key, value) + "\n"
+            for key, value in node2.items():
+                test_diff += "%s : %s" % (key, value) + "\n"
+            sql = 'insert into %s (task_id, storage_time, base_res, test_res) values ("%d", "%s", "%s", "%s");'\
+                  % (database_diff_table, mission_id, get_now_time(), pymysql.escape_string(base_diff), pymysql.escape_string(test_diff))
+            cursor.execute(sql)
+            db.commit()
+        update_errorlog("summary diff result storage OK\n")
+        return 0
+    except:
+        update_errorlog("summary diff result storage Failed\n")  
+        return -1        
+        
+        
 
 def main():
     
@@ -692,9 +792,10 @@ def main():
     update_errorlog("prepare symbolic link for %s Success\n" % test_env)
     
     
-    ### start performance, kill CAPTURE_RESOURCE 
+    ### start performance, kill CAPTURE_RESOURCE
+    update_errorlog("start performance test\n")    
     ret = performance(base_env, test_env, load_path, press_path)
-    if ret == -1:
+    if ret != 0:
         update_errorlog("performance test Failed\n")
         set_status(3)
         os.popen('killall -9 CAPTURE_RESOURCE')
@@ -703,8 +804,16 @@ def main():
     time.sleep(3)
     update_errorlog("performance test OK\n")    
     
-   
-        
+    
+    ### start diff test
+    update_errorlog("start summary diff test\n")
+    ret = sum_diff(base_env, test_env, press_path)
+    if ret != 0:
+        update_errorlog("diff test Failed\n")
+        set_status(3)
+        return -1            
+    update_errorlog("diff test Success\n")    
+     
 
 if __name__ == "__main__":
     main()

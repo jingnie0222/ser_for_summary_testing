@@ -7,11 +7,11 @@ import time
 import os
 #from conf import *
 
-database_host="host"
+database_host="10.144.96.115"
 database_db="summary_test"
 database_table="TestSummary_testsummary"
-database_user="user"
-database_pass="passwd"
+database_user="root"
+database_pass="lzxg@webqa"
 
 #当前机器的IP(10.134.96.64)
 local_ip = os.popen("sogou-host -a | head -1").read().replace('\n', '')
@@ -65,9 +65,7 @@ def main():
             
         mission_id = get_my_id()
         if mission_id is not -1:
-            child = subprocess.Popen(['python', 'testcache_runner.py','%d' % mission_id], shell = False, stdout = log_fd, stderr = log_fd, cwd=testcache_path)
-            # print("aaaaaaaa")
-            # child = subprocess.Popen(['python', 'testcache_runner.py','%d' % mission_id], shell = False, stdout = log_fd, stderr = log_fd)
+            child = subprocess.Popen(['python3', 'test_summary_runner.py','%d' % mission_id], shell = False, stdout = log_fd, stderr = log_fd, cwd=testcache_path)
             task_list[mission_id] = child
 
         cancel_id = get_cancel_id()
