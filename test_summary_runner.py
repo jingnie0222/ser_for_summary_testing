@@ -14,7 +14,9 @@ import myconfigparser
 import math
 from sum_conf import *
 import parsediff
-
+import shutil
+import hashlib
+import socket
 
 ###### global  ######
 db = pymysql.connect(database_host, database_user, database_pass ,database_db, charset="utf8")
@@ -27,6 +29,27 @@ mission_id = int(sys.argv[1])
 def get_now_time():
     timeArray = time.localtime()
     return  time.strftime("%Y-%m-%d %H:%M:%S", timeArray)
+
+def md5_convert(string):
+    """
+    计算字符串md5值
+    :param string: 输入字符串
+    :return: 字符串md5
+    """
+    m = hashlib.md5()
+    m.update(string.encode('utf8'))
+    return m.hexdigest()
+
+def get_host_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(('8.8.8.8', 80))
+        ip = s.getsockname()[0]
+
+    finally:
+        s.close()
+
+    return ip
 
 def get_task_info():
     sql = "SELECT testsvn, basesvn, testitem, newconfip, newconfuser, newconfpassw, newconfpath, newdataip, newdatauser, newdatapassw, newdatapath FROM %s where id='%d'" % (database_table, mission_id)
@@ -159,6 +182,16 @@ def modify_sum_conf(file, db, port, cachesize):
     except Exception as err:
         return -1
 
+def check_file_suffix(path, suffix):
+    exist = False
+    file_list = os.listdir(path)
+    for file in file_list:
+        if file.endswith(suffix):
+            exist = True
+            break
+    
+    return exist
+        
 
 def sync_ol_to_local(rsync_type):
 
@@ -495,6 +528,13 @@ def prepare_symbolic_link(desc_path):
             os.popen("ln -s %s %s" % (root_path + test_script, desc_path + 'start.sh'))
             return 0
             
+        #对gcov环境创建软链，使用test环境的data、conf和start.sh
+        if 'gcov_src' in desc_path:
+            os.popen("ln -s %s %s" % (root_path + test_data, desc_path + 'data'))
+            os.popen("ln -s %s %s" % (root_path + test_conf, desc_path + 'conf'))
+            os.popen("ln -s %s %s" % (root_path + test_script, desc_path + 'start.sh'))
+            return 0
+            
     except Exception as err:
         update_errorlog("[prepare_symbolic_link]:%s" % err)
         return -1
@@ -691,14 +731,215 @@ def sum_diff(base_path, test_path, press_path, err_name = "err"):
         update_errorlog("summary diff result storage Failed\n")  
         return -1        
         
+
+
+def gcov_check(gcov_path, press_path, basesvn, testsvn, err_name = "err"):
+    os.popen('killall -9 lt-websummaryd lt-summarytest')
+    time.sleep(3) 
+    
+    #每次都需要check新代码，若目录存在先删除
+    if os.path.exists(gcov_path):
+        shutil.rmtree(gcov_path)
+    
         
+    asycmd = asycommands.TrAsyCommands(timeout=60*30)
+    #asycmd_list.append(asycmd)
+    
+    #check 代码
+    ret = checkcode_env(gcov_path, testsvn)
+    if ret != 0:
+        update_errorlog("check gcov code Error, pls check\n")
+        set_status(3)
+        return -1        
+    update_errorlog("check gcov code OK\n") 
+    
+    #将gcov_tool目录下的相关工具cp到gcov_src路径下
+    try:
+        os.popen('cp -r %s %s' % (gcov_tool+"*", gcov_path))
+    except Exception as err:
+        print("[gcov_check:%s]" % err)
+        return -1
+    
+    #需sleep一下，否则下一步运行shell脚本的时候，可能还没有完成拷贝，会报错
+    time.sleep(3)
+    
+    #使用make-gcov.sh编译
+    make_gcov_sh = gcov_path + "make-gcov.sh"    
+    for iotype, line in asycmd.execute_with_data(['/bin/sh', make_gcov_sh], shell=False, cwd=gcov_path):
+        pass
+            
+    if asycmd.return_code() != 0:
+        update_errorlog("sh make-gcov.sh Error\n")
+        return -1   
+    
+    #检查gcno文件是否存在
+    try:
+        web_sum = check_file_suffix(gcov_path + "WebSummary/", 'gcno')
+        sum_kernel = check_file_suffix(gcov_path + "summary_kernel/Kernel/.libs", 'gcno')
+        if not web_sum:
+            update_errorlog("no gcno file in WebSummary, Error\n")
+            return -1
+        if not sum_kernel:
+            update_errorlog("no gcno file in summary_kernel, Error\n")
+            return -1
+    except Exception as err:
+        print("[gcov_check:%s]" % err) 
+        return -1        
+                   
+    update_errorlog("make gcov Success\n")
+       
+    #创建data、conf、start.sh软链,使用test环境的data、conf和start.sh
+    gcov_env = gcov_path + 'WebSummary/'
+    ret = prepare_symbolic_link(gcov_env) 
+    if ret != 0:
+        update_errorlog("prepare symbolic link for %s Error\n" % gcov_env)
+        set_status(3)
+        return -1
+    update_errorlog("prepare symbolic link for %s Success\n" % gcov_env)
+    
+    #修改配置文件的监听端口、备库配置、缓存大小等配置
+    gcov_cf = root_path + test_conf + "norm_onsum01.cfg"    
+    ret = modify_sum_conf(gcov_cf, db_standby, test_sum_port, sum_cache_size)
+    if ret == -1:
+        update_errorlog("modify config:%s error\n" % gcov_cf)
+        return -1
+    
+    #启动gcov summary
+    ret, sum_pid  = check_lanch(gcov_env, "start.sh", 19018, err_name)
+    if ret < 0:
+        update_errorlog("Gcov Summary start failed")
+        return -1        
+    update_errorlog("Gcov Summary start ok, use %d s\n" % ret)
+    
+    #启动压力工具
+    press_err_name2 = err_name + "2"  #err2
+    ret, tool2_pid = check_lanch(press_path, "start2.sh", -1, press_err_name2)
+    if ret < 0:
+        update_errorlog("Press Tool  start failed")
+        return -1        
+    update_errorlog("Press Tool start ok, use %d s\n" % ret)
+    
+    update_errorlog("gcov press start, about 20min\n")
+    
+    #等待压力结束   
+    wait_to_die(tool2_pid, 5*60)
+    update_errorlog("Press Tool stoped\n")
+    
+    
+    #执行makegcda-gcov.sh,生成gcda文件
+    #sum_pid = 17791
+    make_gcda_sh = gcov_path + "makegcda-gcov.sh" 
+    for iotype, line in asycmd.execute_with_data(['/bin/sh', make_gcda_sh, str(sum_pid)], shell=False, cwd=gcov_path):
+        pass
+            
+    if asycmd.return_code() != 0:
+        update_errorlog("sh makegcda-gcov.sh Error\n")
+        return -1  
+    
+    #检查gcda文件是否存在
+    try:
+        web_sum = check_file_suffix(gcov_path + "WebSummary/", 'gcda')
+        sum_kernel = check_file_suffix(gcov_path + "summary_kernel/Kernel/.libs", 'gcda')
+        if not web_sum:
+            update_errorlog("no gcda file in WebSummary, Error\n")
+            return -1
+        if not sum_kernel:
+            update_errorlog("no gcda file in summary_kernel, Error\n")
+            return -1
+    except Exception as err:
+        print("[gcov_check:%s]" % err) 
+        return -1        
+                   
+    update_errorlog("generate gcda Success\n")
+    
+    #执行collect-gcov.sh, 收集gcda报告产生info文件
+    collect_gcda_sh = gcov_path + "collect-gcov.sh"    
+    for iotype, line in asycmd.execute_with_data(['/bin/sh', collect_gcda_sh], shell=False, cwd=gcov_path):
+        pass
+            
+    if asycmd.return_code() != 0:
+        update_errorlog("sh collect-gcov.sh Error\n")
+        return -1 
+        
+    update_errorlog("collect gcda Success\n")
+    
+    #执行genhtml-gcov.sh，每次gcov的路径都不一致，否则会覆盖之前的结果，使用当前时间的MD5值作为唯一标识
+    gen_html_sh = gcov_path + "genhtml-gcov.sh"  
+    gcov_dir_suffix = "gcov_" + md5_convert(get_now_time())
+    gcov_dir =  gcov_repo_path + gcov_dir_suffix
+    
+    for iotype, line in asycmd.execute_with_data(['/bin/sh', gen_html_sh, gcov_dir], shell=False, cwd=gcov_path):
+        pass
+            
+    if asycmd.return_code() != 0:
+        update_errorlog("sh genhtml-gcov.sh Error\n")
+        return -1 
+        
+    update_errorlog("generate html Success\n")
+    
+    #执行svndiff-gcov.sh,获取diff的gcov + 执行php diffviewer.php   
+    dict_basesvn = {}
+    dict_testsvn = {}
+    username = "qa_svnreader"
+    password = "New$oGou4U!"
+    diff_view_php = gcov_path + "diffviewer.php"
+    
+    for line in basesvn.split("\n"):
+        line = line.strip()
+        key = line.split('=')[0]
+        value = line.split('=')[1]
+        dict_basesvn[key] = value
+        
+    for line in testsvn.split("\n"):
+        line = line.strip()
+        key = line.split('=')[0]
+        value = line.split('=')[1]
+        dict_testsvn[key] = value
+    
+    for key in dict_basesvn:
+        if dict_basesvn[key] != dict_testsvn[key]:
+            file_name = gcov_path + 'svndiff-gcov-out_' + key
+            f = open(file_name, 'w')
+            child = subprocess.Popen(['svn', 'diff', '--diff-cmd=diff', '-x', '-U0', \
+                                     dict_basesvn[key], dict_testsvn[key],\
+                                     '--username', username, '--password', password],\
+                                     shell=False, cwd = gcov_path, stdout = f.fileno())
+            child.wait()
+    
+            f.close()
+            
+            #执行php diffviewer.php
+            for iotype, line in asycmd.execute_with_data(['php', diff_view_php, file_name, gcov_repo_path, gcov_dir_suffix, key], shell=False, cwd=gcov_path):
+                print(iotype, line)
+                
+            if asycmd.return_code() != 0:
+                update_errorlog("php diffviewer.php Error\n")
+                return -1 
+        
+    update_errorlog("get svndiff and diff_view_php Success\n")
+    
+    gcov_result = os.path.join(gcov_dir, 'append.html')
+    if not os.path.exists(gcov_result):
+        update_errorlog("gcov result is not exists\n")
+        return -1
+
+    ip = get_host_ip()
+    http_result = 'http://' + ip + "/" + gcov_dir_suffix + "/" + 'append.html'
+    print(http_result)
+    sql = "UPDATE %s set code_gcov_result='%s' where id=%d" % (database_table, http_result, mission_id)
+    cursor.execute(sql)
+    db.commit()
+    update_errorlog("gcov result write mysql Success\n")
+    
+    return 0
+
 
 def main():
     
     ### get task info
     (testsvn, basesvn, testitem, newconfip, newconfuser, newconfpassw, newconfpath, newdataip, newdatauser, newdatapassw, newdatapath) = get_task_info()
     print(testsvn, basesvn, testitem, newconfip, newconfuser, newconfpassw, newconfpath, newdataip, newdatauser, newdatapassw, newdatapath)
-    
+    '''
     ### rsync ol_data to local
     ret_sync_ol_data = sync_ol_to_local('data')
     if ret_sync_ol_data != 0:
@@ -813,7 +1054,18 @@ def main():
         set_status(3)
         return -1            
     update_errorlog("diff test Success\n")    
-     
-
+    '''
+    
+    ### start gcov check
+    update_errorlog("start gcov check\n")
+    gcov_path = root_path + gcov_src
+    ret = gcov_check(gcov_path, press_path, basesvn, testsvn)
+    if ret != 0:
+        update_errorlog("gcov check Failed\n")
+        set_status(3)
+        return -1            
+    update_errorlog("gcov check Success\n")    
+    
+    
 if __name__ == "__main__":
     main()
