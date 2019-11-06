@@ -5,7 +5,7 @@ import subprocess
 import pymysql
 import time
 import os
-#from conf import *
+from sum_conf import *
 
 database_host="10.144.96.115"
 database_db="summary_test"
@@ -15,9 +15,6 @@ database_pass="lzxg@webqa"
 
 #当前机器的IP(10.134.96.64)
 local_ip = os.popen("sogou-host -a | head -1").read().replace('\n', '')
-
-log_file = "./test_log"
-
 
 log_fd = open(log_file, 'w')
 
@@ -54,8 +51,9 @@ def main():
     task_list = {}
     while True:      
         time.sleep(2)
-        running_id = get_running_id();
-        if (running_id != -1):
+        running_id = get_running_id()
+        print("running_id:%d" % running_id)
+        if running_id != -1:
             continue
                 
         #检查子进程是否结束，不为None表示进程结束       
@@ -64,13 +62,13 @@ def main():
                 del task_list[k]
             
         mission_id = get_my_id()
-        if mission_id is not -1:
-            child = subprocess.Popen(['python3', 'test_summary_runner.py','%d' % mission_id], shell = False, stdout = log_fd, stderr = log_fd, cwd=testcache_path)
+        if mission_id != -1:
+            child = subprocess.Popen(['/usr/local/bin/python3', 'test_summary_runner.py','%d' % mission_id], shell = False, stdout = log_fd, stderr = log_fd, cwd=testsummary_path)
             task_list[mission_id] = child
 
         cancel_id = get_cancel_id()
         print("cancel_id:%d" % cancel_id)
-        if cancel_id is -1:
+        if cancel_id == -1:
             continue
         if cancel_id in task_list:
             task_list[cancel_id].send_signal(10)
