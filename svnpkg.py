@@ -30,7 +30,7 @@ class SvnPackage:
         return self._do_svn('up', localpath)
         
     def svn_sw(self, svnurl_to, localpath):
-        return self._do_svn('sw', svnurl_to + " " + localpath)
+        return self._do_svn('sw', "--accept theirs-conflict " + svnurl_to + " " + localpath)
         
     def svn_co(self, svnurl, localpath):
         try:
