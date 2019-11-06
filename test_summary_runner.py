@@ -17,6 +17,8 @@ import parsediff
 import shutil
 import hashlib
 import socket
+import signal
+import datetime
 
 ###### global  ######
 db = pymysql.connect(database_host, database_user, database_pass ,database_db, charset="utf8")
@@ -78,9 +80,9 @@ def set_status(stat):
         clean_proc()
 
 def clean_proc():
-    os.popen('killall -9 memcached lt-memdb_daemon sggp lt-webcached')
+    os.popen('killall -9 lt-websummaryd lt-summarytest CAPTURE_RESOURCE')
     time.sleep(3)
-    return
+    return 0
     
 '''       
 def clean_proc():
@@ -129,11 +131,14 @@ def wait_to_die(pid, interval):
 def wait_to_load(pid, mem, load, interval):
     #检查机器的负载是否达到load，内存占用是否达到memG
     #占用内存前需要先清除系统缓存
-    os.popen('echo 3 > /proc/sys/vm/drop_caches')  
+    #最多等待5分钟，防止内存占用不到memG，无法退出循环的问题
+    os.popen('echo 3 > /proc/sys/vm/drop_caches') 
+    time.sleep(10)    
     load_capture = False
     mem_capture = False
     p = psutil.Process(pid)
-        
+    start = datetime.datetime.now()   
+    
     while True:
         (load_1, load_5, load_15) = psutil.getloadavg()
         print("load:%d" % int(load_1))
@@ -151,7 +156,14 @@ def wait_to_load(pid, mem, load, interval):
             update_errorlog("LoadAvg > %d and mem >= %d\n" % (load, mem))
             break
             
-        print("LoadAvg < %d or mem <= %d" % (load, mem))       
+        print("LoadAvg < %d or mem <= %d" % (load, mem))  
+        
+        now = datetime.datetime.now()
+        print("time cost=%d" % (now-start).seconds)
+        if (now-start).seconds >= 300:
+            update_errorlog("wait load 5 minutes, now load=%d, mem=%d" % (int(load_1), mem_g))
+            break
+            
         time.sleep(interval)
         if (interval > 10):
             interval = interval/2
@@ -554,7 +566,7 @@ def get_perf_res(log_file, result):
 def performance(base_path, test_path, load_path, press_path, err_name = "err"): 
 
     os.popen('killall -9 lt-websummaryd lt-summarytest CAPTURE_RESOURCE')
-    time.sleep(3) 
+    time.sleep(5) 
 
     #修改配置文件的监听端口、备库配置、缓存大小等配置
     base_cf = root_path + base_conf + "norm_onsum01.cfg"
@@ -591,8 +603,8 @@ def performance(base_path, test_path, load_path, press_path, err_name = "err"):
         return -1        
     update_errorlog("Load Tool start ok, use %d s\n" % ret)
     
-    #等负载生效，负载为20，占用内存50G:pid, mem, load, interval
-    wait_to_load(laod_pid, 50, 20, 20)
+    #等负载生效，负载为13，占用内存50G:pid, mem, load, interval
+    wait_to_load(laod_pid, 50, 13, 20)
     
     
     #启动压力工具1
@@ -645,15 +657,16 @@ def performance(base_path, test_path, load_path, press_path, err_name = "err"):
     sql = "UPDATE %s set performance_test='%s' where id=%d;" % (database_table, test_perf_str, mission_id)
     cursor.execute(sql)
     db.commit()
-    update_errorlog("test summary statistics ok\n")
+    update_errorlog("test summary statistics ok\n")   
+    return 0
     
 
 def sum_diff(base_path, test_path, press_path, err_name = "err"): 
     os.popen('killall -9 lt-websummaryd lt-summarytest CAPTURE_RESOURCE')
-    time.sleep(3) 
+    time.sleep(5) 
     base_diff_lst = []
     test_diff_lst = []
-    '''
+    
     #修改配置文件的监听端口、备库配置、缓存大小等配置
     base_cf = root_path + base_conf + "norm_onsum01.cfg"
     test_cf = root_path + test_conf + "norm_onsum01.cfg"
@@ -706,7 +719,7 @@ def sum_diff(base_path, test_path, press_path, err_name = "err"):
     
     wait_to_die(tool2_pid, 2*60)
     update_errorlog("Press Tool2 stoped\n")
-    '''
+    
     ret = parsediff.gen_diff(base_path + err_name, test_path + err_name, base_diff_lst, test_diff_lst)
     if ret != 0:
         update_errorlog("parse diff error\n")
@@ -734,8 +747,8 @@ def sum_diff(base_path, test_path, press_path, err_name = "err"):
 
 
 def gcov_check(gcov_path, press_path, basesvn, testsvn, err_name = "err"):
-    os.popen('killall -9 lt-websummaryd lt-summarytest')
-    time.sleep(3) 
+    os.popen('killall -9 lt-websummaryd lt-summarytest CAPTURE_RESOURCE')
+    time.sleep(5) 
     
     #每次都需要check新代码，若目录存在先删除
     if os.path.exists(gcov_path):
@@ -910,7 +923,7 @@ def gcov_check(gcov_path, press_path, basesvn, testsvn, err_name = "err"):
             
             #执行php diffviewer.php
             for iotype, line in asycmd.execute_with_data(['php', diff_view_php, file_name, gcov_repo_path, gcov_dir_suffix, key], shell=False, cwd=gcov_path):
-                print(iotype, line)
+                pass
                 
             if asycmd.return_code() != 0:
                 update_errorlog("php diffviewer.php Error\n")
@@ -934,12 +947,14 @@ def gcov_check(gcov_path, press_path, basesvn, testsvn, err_name = "err"):
     return 0
 
 
+
 def main():
     
     ### get task info
     (testsvn, basesvn, testitem, newconfip, newconfuser, newconfpassw, newconfpath, newdataip, newdatauser, newdatapassw, newdatapath) = get_task_info()
-    print(testsvn, basesvn, testitem, newconfip, newconfuser, newconfpassw, newconfpath, newdataip, newdatauser, newdatapassw, newdatapath)
-    '''
+    #print(testsvn, basesvn, testitem, newconfip, newconfuser, newconfpassw, newconfpath, newdataip, newdatauser, newdatapassw, newdatapath)
+
+    
     ### rsync ol_data to local
     ret_sync_ol_data = sync_ol_to_local('data')
     if ret_sync_ol_data != 0:
@@ -1033,39 +1048,59 @@ def main():
     update_errorlog("prepare symbolic link for %s Success\n" % test_env)
     
     
-    ### start performance, kill CAPTURE_RESOURCE
-    update_errorlog("start performance test\n")    
-    ret = performance(base_env, test_env, load_path, press_path)
-    if ret != 0:
-        update_errorlog("performance test Failed\n")
-        set_status(3)
-        os.popen('killall -9 CAPTURE_RESOURCE')
-        return -1
-    os.popen('killall -9 CAPTURE_RESOURCE') 
-    time.sleep(3)
-    update_errorlog("performance test OK\n")    
+    
+    ### after performance, kill CAPTURE_RESOURCE
+    if 'performance' in testitem:
+        update_errorlog("start performance test\n")    
+        ret = performance(base_env, test_env, load_path, press_path)
+        if ret != 0:
+            update_errorlog("performance test Failed\n")
+            set_status(3)
+            os.popen('killall -9 CAPTURE_RESOURCE')
+            return -1
+        os.popen('killall -9 CAPTURE_RESOURCE') 
+        time.sleep(3)
+        update_errorlog("performance test OK\n")    
     
     
     ### start diff test
-    update_errorlog("start summary diff test\n")
-    ret = sum_diff(base_env, test_env, press_path)
-    if ret != 0:
-        update_errorlog("diff test Failed\n")
-        set_status(3)
-        return -1            
-    update_errorlog("diff test Success\n")    
-    '''
+    if 'difftest' in testitem:
+        update_errorlog("start summary diff test\n")
+        ret = sum_diff(base_env, test_env, press_path)
+        if ret != 0:
+            update_errorlog("diff test Failed\n")
+            set_status(3)
+            return -1            
+        update_errorlog("diff test Success\n")    
+    
     
     ### start gcov check
-    update_errorlog("start gcov check\n")
-    gcov_path = root_path + gcov_src
-    ret = gcov_check(gcov_path, press_path, basesvn, testsvn)
-    if ret != 0:
-        update_errorlog("gcov check Failed\n")
-        set_status(3)
-        return -1            
-    update_errorlog("gcov check Success\n")    
-    
-    
+    if 'gcov' in testitem:
+        update_errorlog("start gcov check\n")
+        gcov_path = root_path + gcov_src
+        ret = gcov_check(gcov_path, press_path, basesvn, testsvn)
+        if ret != 0:
+            update_errorlog("gcov check Failed\n")
+            set_status(3)
+            return -1            
+        update_errorlog("gcov check Success\n")  
+     
+    set_status(4)
+    return 0
+
+def sig_handler(sig, frame):
+    update_errorlog("task %d has been canceled\n" % mission_id)
+    set_status(5)
+    sys.exit()
+
+
+signal.signal(10, sig_handler)
+signal.signal(15, sig_handler)
+   
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        update_errorlog("%s\n" % e) 
+        set_status(5)
+        
